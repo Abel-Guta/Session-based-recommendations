@@ -1,71 +1,46 @@
+from neo4j import GraphDatabase
+from dotenv import load_dotenv
+import os
 
-from collections import defaultdict
+load_dotenv()
+URI      = os.getenv("NEO4J_URI")
+USER     = os.getenv("NEO4J_USER")
+PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 class RICRecommender:
     def __init__(self, alpha=0.3):
-        self.alpha = alpha 
-        self.co_occurrences = defaultdict(int)  
-        self.single_counts = defaultdict(int)   
-        self.total_sessions = 0
-        self.all_items = set()
+        self.alpha = alpha
+        self.driver = GraphDatabase.driver(URI, auth=(USER, PASSWORD))
 
-
-    def recommend(self, session, top_k=2):
-        """
-        Generates recommendations by updating weights click-by-click.
-        """
+    def recommend(self, session, top_k=20):
+        session = [str(i) for i in session]
+        clicked = set(session)
         weights = {}
-        
-        for item in self.all_items:
-            weights[item] = 0.0
 
-      
-        for current_item in session:
-            for target_item in self.all_items:
-                pair = tuple(sorted([current_item, target_item]))
-                
-                if self.co_occurrences[pair] > 0:
-                    c_t = self.co_occurrences[pair] / self.single_counts[current_item]
-                else:
-                    c_t = self.single_counts[target_item] / self.total_sessions 
+        with self.driver.session() as db:
+            for clicked_item in session:
 
-                weights[target_item] = (self.alpha * weights[target_item]) + ((1 - self.alpha) * c_t)
+                result = db.run("""
+                    MATCH (t:Item {id:$t})-[r:IN_SAME_SESSION]-(c:Item)
+                    WITH c.id AS item, r.count AS cooc,
+                         [(t)-[rx:IN_SAME_SESSION]-() | rx.count] AS all_counts
+                    RETURN item, cooc, reduce(s=0, x IN all_counts | s+x) AS t_total
+                """, t=clicked_item)
 
-      
-        sorted_items = [k for k, v in sorted(weights.items(), key=lambda x: x[1], reverse=True)]
+                for row in result:
+                    candidate = row["item"]
+                    t_total   = row["t_total"] or 1
+                    co_prob   = row["cooc"] / t_total
 
-        
-        last_clicked = session[-1]
-        
-        if last_clicked in sorted_items:
-            sorted_items.remove(last_clicked)
-            sorted_items.append(last_clicked) 
+                    old = weights.get(candidate, 0.0)
+                    weights[candidate] = self.alpha * old + (1 - self.alpha) * co_prob
 
         
-        return sorted_items[:top_k]
+        sorted_items = sorted(
+            [(item, w) for item, w in weights.items() if item not in clicked],
+            key=lambda x: x[1], reverse=True
+        )
+        return [item for item, _ in sorted_items[:top_k]]
 
-    def train(self, sessions):
-        """
-        Loops through historical sessions to build the co-occurrence graph.
-        """
-        for session in sessions:
-            self.total_sessions += 1
-            
-            
-            unique_items = list(set(session))
-            
-            for i in range(len(unique_items)):
-                item_A = unique_items[i]
-                self.single_counts[item_A] += 1
-                self.all_items.add(item_A)
-                
-                
-                for j in range(i + 1, len(unique_items)):
-                    item_B = unique_items[j]
-                    
-                    
-                    pair = tuple(sorted([item_A, item_B]))
-                    self.co_occurrences[pair] += 1
-                    
-        print("RIC Graph successfully built!")
-        
+    def close(self):
+        self.driver.close()
