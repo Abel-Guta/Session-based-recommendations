@@ -3,7 +3,7 @@
 __pycache__/
 *.py[cod]
 
-# Local/generated artifacts
+
 data/sessions_cache.pkl
 data/yoochoose/
 applsci-13-00394.pdf
